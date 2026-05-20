@@ -326,6 +326,121 @@ function pruneExpiredSessions(sessions) {
   return sessions.filter((s) => s?.expiresAt && new Date(s.expiresAt).getTime() > now);
 }
 
+function normalizePushToken(token) {
+  return String(token || '').trim();
+}
+
+function normalizeDeviceId(deviceId) {
+  return String(deviceId || '').trim().slice(0, 200);
+}
+
+function compactPushTokens(tokens) {
+  if (!Array.isArray(tokens)) return [];
+  const seen = new Map();
+  for (const item of tokens) {
+    const token = normalizePushToken(item?.token);
+    const deviceId = normalizeDeviceId(item?.deviceId);
+    if (!token) continue;
+    const key = `${token}::${deviceId}`;
+    seen.set(key, { token, deviceId, createdAt: item?.createdAt || new Date() });
+  }
+  return Array.from(seen.values()).slice(-20);
+}
+
+function updateUserPushToken(user, token, deviceId) {
+  const normalizedToken = normalizePushToken(token);
+  if (!normalizedToken) return;
+  const normalizedDeviceId = normalizeDeviceId(deviceId);
+
+  const tokens = compactPushTokens([...(user.pushTokens || [])]);
+  const existingIndex = tokens.findIndex(
+    (item) => item.deviceId && item.deviceId === normalizedDeviceId
+  );
+  if (existingIndex >= 0) {
+    tokens[existingIndex] = {
+      token: normalizedToken,
+      deviceId: normalizedDeviceId,
+      createdAt: new Date(),
+    };
+  } else {
+    const tokenIndex = tokens.findIndex((item) => item.token === normalizedToken);
+    if (tokenIndex >= 0) {
+      tokens[tokenIndex] = {
+        token: normalizedToken,
+        deviceId: normalizedDeviceId,
+        createdAt: new Date(),
+      };
+    } else {
+      tokens.push({
+        token: normalizedToken,
+        deviceId: normalizedDeviceId,
+        createdAt: new Date(),
+      });
+    }
+  }
+  user.pushTokens = compactPushTokens(tokens);
+}
+
+async function sendOwnerPushNotifications(ownerId, payload, opts = {}) {
+  if (!ownerId || !payload || typeof payload !== 'object') return;
+  const user = await User.findOne({ ownerId });
+  if (!user || !Array.isArray(user.pushTokens) || user.pushTokens.length === 0) return;
+
+  const excludeDeviceId = normalizeDeviceId(opts.excludeDeviceId);
+  const excludeToken = normalizePushToken(opts.excludeToken);
+
+  const messages = user.pushTokens
+    .map((item) => ({
+      token: normalizePushToken(item.token),
+      deviceId: normalizeDeviceId(item.deviceId),
+    }))
+    .filter(
+      (item) =>
+        item.token &&
+        item.token !== excludeToken &&
+        item.deviceId !== excludeDeviceId
+    )
+    .map((item) => ({
+      to: item.token,
+      sound: 'default',
+      title: payload.title || 'Utang Tracker',
+      body: payload.body || '',
+      data: payload.data || {},
+    }));
+
+  if (messages.length === 0) return;
+
+  try {
+    const { Expo } = await import('expo-server-sdk');
+    const expo = new Expo({});
+    const chunks = expo.chunkPushNotifications(messages);
+    const receipts = [];
+    for (const chunk of chunks) {
+      const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+      receipts.push(...ticketChunk);
+    }
+    const invalidTokens = new Set();
+
+    receipts.forEach((receipt, idx) => {
+      if (receipt.status === 'error') {
+        const token = messages[idx]?.to;
+        if (receipt.details?.error === 'DeviceNotRegistered' || receipt.details?.error === 'InvalidCredentials') {
+          invalidTokens.add(token);
+        }
+      }
+    });
+
+    if (invalidTokens.size > 0) {
+      user.pushTokens = (user.pushTokens || []).filter(
+        (item) => !invalidTokens.has(normalizePushToken(item.token))
+      );
+      await user.save();
+    }
+  } catch (e) {
+    console.error('[Push] send failed', e?.message || e);
+  }
+}
+
 /**
  * @param {import('mongoose').Document} user
  * @param {{ replaceAll?: boolean }} [opts] replaceAll=true revokes every other device (password / PIN reset).
