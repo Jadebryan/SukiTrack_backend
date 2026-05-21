@@ -891,6 +891,10 @@ function normalizeInventoryUploadMime(v) {
 }
 
 /** Walang auth — para macheck kung ang tamang server ang tumatakbo (may /pages/* routes). */
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 app.get('/api/v1/health', (req, res) => {
   res.json({
     ok: true,
