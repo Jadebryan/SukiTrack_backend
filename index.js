@@ -767,7 +767,7 @@ if (process.env.TRUST_PROXY === '1') {
   app.set('trust proxy', 1);
 }
 
-app.get('', (req, res) => {
+app.get('/', (req, res) => {
   res.status(200).json({ status: 'ok' });
 });
 
